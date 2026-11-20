@@ -1,7 +1,20 @@
-from datetime import date, datetime
+import csv
+import io
 import os
+import re
+from datetime import date, datetime
+
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    Response,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
@@ -336,9 +349,7 @@ def edit_project(project_id: int):
         project.title = title
         project.description = request.form.get("description", "").strip()
         project.stage_id = (
-            stage_id
-            if stage_id and db.session.get(Stage, stage_id)
-            else None
+            stage_id if stage_id and db.session.get(Stage, stage_id) else None
         )
         project.status = request.form.get("status", project.status)
         project.tech_stack = request.form.get("tech_stack", "").strip()
@@ -463,137 +474,296 @@ def calendar_events_api():
         )
     return jsonify(events)
 
-import json
-from flask import Response, flash
 
-# --- JSON Backup & Import Routes ---
-@app.route("/api/export/json")
-def export_json():
-  roadmaps = Roadmap.query.all()
-  data = []
-  
-  for rm in roadmaps:
-    rm_dict = {
-      "title": rm.title,
-      "description": rm.description,
-      "color_hex": rm.color_hex,
-      "stages": [],
-      "projects": [],
-      "notes": []
+# --- CSV Backup & Import ---
+CSV_COLUMNS = [
+    "id",
+    "type",
+    "parent_id",
+    "stage_id",
+    "topic_id",
+    "title",
+    "description",
+    "color_hex",
+    "status",
+    "priority",
+    "due_date",
+    "position",
+    "tech_stack",
+    "repo_url",
+    "content",
+]
+CSV_TYPES = {"roadmap", "stage", "topic", "project", "note"}
+TOPIC_STATUSES = {"not_started", "in_progress", "completed"}
+PROJECT_STATUSES = {"planned", "in_progress", "completed"}
+PRIORITIES = {"low", "medium", "high"}
+COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _csv_date(value: date | None) -> str:
+    return value.isoformat() if value else ""
+
+
+def _normalize_csv_row(row: dict) -> dict:
+    return {
+        column: value.strip() if isinstance(value := row.get(column), str) else ""
+        for column in CSV_COLUMNS
     }
-    
-    for s in rm.stages:
-      s_dict = {
-        "title": s.title,
-        "description": s.description,
-        "position": s.position,
-        "topics": [{
-          "title": t.title,
-          "status": t.status,
-          "priority": t.priority,
-          "due_date": t.due_date.isoformat() if t.due_date else None,
-          "position": t.position
-        } for t in s.topics]
-      }
-      rm_dict["stages"].append(s_dict)
-      
-    for p in rm.projects:
-      rm_dict["projects"].append({
-        "title": p.title,
-        "description": p.description,
-        "status": p.status,
-        "tech_stack": p.tech_stack,
-        "repo_url": p.repo_url,
-        "due_date": p.due_date.isoformat() if p.due_date else None
-      })
-      
-    for n in rm.notes:
-      rm_dict["notes"].append({
-        "title": n.title,
-        "content": n.content
-      })
-      
-    data.append(rm_dict)
 
-  json_data = json.dumps(data, indent=2)
-  return Response(
-    json_data,
-    mimetype="application/json",
-    headers={"Content-Disposition": "attachment;filename=roadmap_backup.json"}
-  )
 
-@app.route("/roadmap/import", methods=["POST"])
-def import_json():
-  file = request.files.get("file")
-  if not file:
+def _parse_csv_rows(reader) -> dict:
+    rows = {}
+    for row in reader:
+        line_no = reader.line_num
+        data = _normalize_csv_row(row)
+        type_ = data["type"].lower()
+        key = data["id"]
+
+        if type_ not in CSV_TYPES:
+            raise ValueError(f"Line {line_no}: unknown row type '{type_}'.")
+        if not key:
+            raise ValueError(f"Line {line_no}: id is required.")
+        if key in rows:
+            raise ValueError(f"Line {line_no}: duplicate id '{key}'.")
+        if not data["title"]:
+            raise ValueError(f"Line {line_no}: title is required.")
+
+        if type_ == "roadmap":
+            data["color_hex"] = data["color_hex"] or "#3b82f6"
+            if not COLOR_PATTERN.fullmatch(data["color_hex"]):
+                raise ValueError(f"Line {line_no}: color_hex must be #RRGGBB.")
+        elif type_ == "topic":
+            data["status"] = data["status"] or "not_started"
+            data["priority"] = data["priority"] or "medium"
+            if data["status"] not in TOPIC_STATUSES:
+                raise ValueError(f"Line {line_no}: invalid topic status.")
+            if data["priority"] not in PRIORITIES:
+                raise ValueError(f"Line {line_no}: invalid topic priority.")
+        elif type_ == "project":
+            data["status"] = data["status"] or "planned"
+            if data["status"] not in PROJECT_STATUSES:
+                raise ValueError(f"Line {line_no}: invalid project status.")
+
+        if data["due_date"]:
+            try:
+                date.fromisoformat(data["due_date"])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Line {line_no}: due_date must be YYYY-MM-DD."
+                ) from exc
+        if data["position"]:
+            try:
+                int(data["position"])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Line {line_no}: position must be an integer."
+                ) from exc
+
+        rows[key] = (type_, data, line_no)
+
+    def check_reference(key, expected_type, label, line_no, required=True):
+        if not key:
+            if required:
+                raise ValueError(f"Line {line_no}: {label} is required.")
+            return
+        if key not in rows or rows[key][0] != expected_type:
+            raise ValueError(
+                f"Line {line_no}: {label} id '{key}' must reference a "
+                f"{expected_type} row."
+            )
+
+    for type_, data, line_no in rows.values():
+        if type_ in {"stage", "project", "note"}:
+            check_reference(data["parent_id"], "roadmap", "parent_id", line_no)
+        elif type_ == "topic":
+            check_reference(data["parent_id"], "stage", "parent_id", line_no)
+        if type_ in {"project", "note"} and data["stage_id"]:
+            check_reference(data["stage_id"], "stage", "stage_id", line_no, False)
+        if type_ == "note" and data["topic_id"]:
+            check_reference(data["topic_id"], "topic", "topic_id", line_no, False)
+
+    return rows
+
+
+@app.route("/api/export/csv")
+def export_csv():
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
+    writer.writeheader()
+    next_id = 1
+    stage_keys = {}
+    topic_keys = {}
+
+    def add_row(type_, **fields):
+        nonlocal next_id
+        row = dict.fromkeys(CSV_COLUMNS, "")
+        row["id"] = next_id
+        row["type"] = type_
+        row.update(fields)
+        writer.writerow(row)
+        next_id += 1
+        return row["id"]
+
+    for roadmap in Roadmap.query.order_by(Roadmap.id).all():
+        roadmap_key = add_row(
+            "roadmap",
+            title=roadmap.title,
+            description=roadmap.description or "",
+            color_hex=roadmap.color_hex or "#3b82f6",
+        )
+        for stage in roadmap.stages:
+            stage_key = add_row(
+                "stage",
+                parent_id=roadmap_key,
+                title=stage.title,
+                description=stage.description or "",
+                position=stage.position or 0,
+            )
+            stage_keys[stage.id] = stage_key
+            for topic in stage.topics:
+                topic_keys[topic.id] = add_row(
+                    "topic",
+                    parent_id=stage_key,
+                    title=topic.title,
+                    status=topic.status or "not_started",
+                    priority=topic.priority or "medium",
+                    due_date=_csv_date(topic.due_date),
+                    position=topic.position or 0,
+                )
+        for project in roadmap.projects:
+            add_row(
+                "project",
+                parent_id=roadmap_key,
+                stage_id=stage_keys.get(project.stage_id, ""),
+                title=project.title,
+                description=project.description or "",
+                status=project.status or "planned",
+                tech_stack=project.tech_stack or "",
+                repo_url=project.repo_url or "",
+                due_date=_csv_date(project.due_date),
+            )
+        for note in roadmap.notes:
+            add_row(
+                "note",
+                parent_id=roadmap_key,
+                stage_id=stage_keys.get(note.stage_id, ""),
+                topic_id=topic_keys.get(note.topic_id, ""),
+                title=note.title,
+                content=note.content,
+            )
+
+    return Response(
+        output.getvalue().encode("utf-8-sig"),
+        content_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=roadmap_backup.csv"},
+    )
+
+
+@app.route("/roadmap/import/csv", methods=["POST"])
+def import_csv():
+    file = request.files.get("file")
+    if not file or not file.filename:
+        flash("Choose a CSV file to import.", "danger")
+        return redirect(url_for("index"))
+
+    try:
+        reader = csv.DictReader(
+            io.StringIO(file.read().decode("utf-8-sig"), newline="")
+        )
+        if not reader.fieldnames or not {"id", "type", "title"}.issubset(
+            reader.fieldnames
+        ):
+            raise ValueError("CSV must have id, type, and title columns.")
+        rows = _parse_csv_rows(reader)
+    except (UnicodeDecodeError, csv.Error, ValueError) as exc:
+        flash(f"CSV import failed: {exc}", "danger")
+        return redirect(url_for("index"))
+
+    try:
+        if request.form.get("replace") == "1":
+            db.session.query(Note).delete()
+            db.session.query(Project).delete()
+            db.session.query(Topic).delete()
+            db.session.query(Stage).delete()
+            db.session.query(Roadmap).delete()
+            db.session.flush()
+
+        created = {}
+        for type_ in ("roadmap", "stage", "topic", "project", "note"):
+            for key, (row_type, data, _) in rows.items():
+                if row_type != type_:
+                    continue
+                if type_ == "roadmap":
+                    obj = Roadmap(
+                        title=data["title"],
+                        description=data["description"] or None,
+                        color_hex=data["color_hex"],
+                    )
+                elif type_ == "stage":
+                    obj = Stage(
+                        roadmap_id=created[data["parent_id"]].id,
+                        title=data["title"],
+                        description=data["description"] or None,
+                        position=int(data["position"] or 0),
+                    )
+                elif type_ == "topic":
+                    obj = Topic(
+                        stage_id=created[data["parent_id"]].id,
+                        title=data["title"],
+                        status=data["status"],
+                        priority=data["priority"],
+                        due_date=date.fromisoformat(data["due_date"])
+                        if data["due_date"]
+                        else None,
+                        position=int(data["position"] or 0),
+                    )
+                elif type_ == "project":
+                    obj = Project(
+                        roadmap_id=created[data["parent_id"]].id,
+                        stage_id=created[data["stage_id"]].id
+                        if data["stage_id"]
+                        else None,
+                        title=data["title"],
+                        description=data["description"] or None,
+                        status=data["status"],
+                        tech_stack=data["tech_stack"] or None,
+                        repo_url=data["repo_url"] or None,
+                        due_date=date.fromisoformat(data["due_date"])
+                        if data["due_date"]
+                        else None,
+                    )
+                else:
+                    obj = Note(
+                        roadmap_id=created[data["parent_id"]].id,
+                        stage_id=created[data["stage_id"]].id
+                        if data["stage_id"]
+                        else None,
+                        topic_id=created[data["topic_id"]].id
+                        if data["topic_id"]
+                        else None,
+                        title=data["title"],
+                        content=data["content"],
+                    )
+                db.session.add(obj)
+                db.session.flush()
+                created[key] = obj
+
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.exception("CSV import failed")
+        flash(f"CSV import failed: {exc}", "danger")
+        return redirect(url_for("index"))
+
+    counts = dict.fromkeys(CSV_TYPES, 0)
+    for type_, _, _ in rows.values():
+        counts[type_] += 1
+    flash(
+        "Imported {roadmap} roadmap(s), {stage} stage(s), {topic} topic(s), "
+        "{project} project(s), and {note} note(s).".format(**counts),
+        "success",
+    )
     return redirect(url_for("index"))
-    
-  try:
-    content = file.read().decode("utf-8")
-    data = json.loads(content)
-    
-    if not isinstance(data, list):
-      data = [data]
-      
-    for rm_data in data:
-      roadmap = Roadmap(
-        title=rm_data.get("title", "Imported Roadmap"),
-        description=rm_data.get("description"),
-        color_hex=rm_data.get("color_hex", "#3b82f6")
-      )
-      db.session.add(roadmap)
-      db.session.flush() # Get roadmap.id
-      
-      # Map stage titles to new stage objects for notes/projects reference if needed
-      stage_map = {}
-      for s_data in rm_data.get("stages", []):
-        stage = Stage(
-          roadmap_id=roadmap.id,
-          title=s_data.get("title", "Stage"),
-          description=s_data.get("description"),
-          position=s_data.get("position", 0)
-        )
-        db.session.add(stage)
-        db.session.flush()
-        stage_map[stage.title] = stage.id
-        
-        for t_data in s_data.get("topics", []):
-          topic = Topic(
-            stage_id=stage.id,
-            title=t_data.get("title", "Topic"),
-            status=t_data.get("status", "not_started"),
-            priority=t_data.get("priority", "medium"),
-            due_date=parse_date(t_data.get("due_date")),
-            position=t_data.get("position", 0)
-          )
-          db.session.add(topic)
-          
-      for p_data in rm_data.get("projects", []):
-        project = Project(
-          roadmap_id=roadmap.id,
-          title=p_data.get("title", "Project"),
-          description=p_data.get("description"),
-          status=p_data.get("status", "planned"),
-          tech_stack=p_data.get("tech_stack"),
-          repo_url=p_data.get("repo_url"),
-          due_date=parse_date(p_data.get("due_date"))
-        )
-        db.session.add(project)
-        
-      for n_data in rm_data.get("notes", []):
-        note = Note(
-          roadmap_id=roadmap.id,
-          title=n_data.get("title", "Note"),
-          content=n_data.get("content", "")
-        )
-        db.session.add(note)
-        
-    db.session.commit()
-  except Exception as e:
-    db.session.rollback()
-    print(f"Import error: {e}")
-    
-  return redirect(url_for("index"))
 
 
 if __name__ == "__main__":

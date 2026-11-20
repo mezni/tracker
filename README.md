@@ -12,7 +12,7 @@ Organize learning or career goals into roadmaps, break them into stages and topi
 - **Projects** with status, tech stack, repository URL, due date, and optional stage link
 - **Notes** attachable to a roadmap, stage, or topic
 - **Calendar view** aggregating topic and project deadlines via JSON API
-- **JSON export/import** for backups and migrations
+- **CSV export/import** for backups and migrations (single file, all records)
 - Server-rendered UI using Bootstrap and Bootstrap Icons (CDN)
 
 ## Tech Stack
@@ -60,16 +60,44 @@ The SQLite file is created in `instance/`.
 | `/`                          | Roadmap dashboard                  |
 | `/calendar`                  | Calendar of all deadlines          |
 | `/api/calendar/events`       | JSON feed of topics/projects       |
-| `/api/export/json`           | Download a JSON backup             |
-| `/roadmap/import`            | Import a JSON backup (POST)        |
+| `/api/export/csv`            | Download a CSV backup              |
+| `/roadmap/import/csv`        | Import a CSV backup (POST)         |
 
 Creating, editing, deleting, and status-cycling items are handled through form `POST` routes defined in `src/main.py`.
+
+### CSV Backup Format
+
+The export is a single UTF-8 CSV file. Each row has a `type` (`roadmap`, `stage`,
+`topic`, `project`, or `note`) and an `id` used by `parent_id`, `stage_id`, and
+`topic_id` to preserve relationships:
+
+| Column        | Used by                  | Description                              |
+| ------------- | ------------------------ | ---------------------------------------- |
+| `id`          | all                      | Unique key within the file               |
+| `type`        | all                      | Record type                              |
+| `parent_id`   | stage/topic/project/note | Roadmap id (or stage id for a topic)     |
+| `stage_id`    | project/note             | Optional linked stage id                 |
+| `topic_id`    | note                     | Optional linked topic id                 |
+| `title`       | all                      | Required                                 |
+| `description` | roadmap/stage/project    | Optional                                 |
+| `color_hex`   | roadmap                  | `#RRGGBB` accent color                   |
+| `status`      | topic/project            | `not_started`/`in_progress`/`completed` or `planned`/`in_progress`/`completed` |
+| `priority`    | topic                    | `low`/`medium`/`high`                    |
+| `due_date`    | topic/project            | `YYYY-MM-DD`                             |
+| `position`    | stage/topic              | Integer sort order                       |
+| `tech_stack`  | project                  | Optional                                 |
+| `repo_url`    | project                  | Optional                                 |
+| `content`     | note                     | Note body                                |
+
+Export first to get a valid example. Import appends the records by default; check
+**Replace all existing data** in the import dialog to restore a backup over the
+current data.
 
 ## Project Structure
 
 ```
 src/
-  main.py              Flask app, models, routes, JSON import/export
+  main.py              Flask app, models, routes, CSV import/export
   templates/
     base.html          Shared layout and navigation
     index.html         Roadmap dashboard
