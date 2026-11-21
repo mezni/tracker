@@ -322,3 +322,42 @@ For architect-level projects, also include:
 - Security architecture
 - Cost estimates and capacity planning
 - Implementation roadmap
+
+## Diagram Color Convention
+
+The colors in this Mermaid flowchart distinguish architectural components by their role in the ticket-classification workflow. Each node uses a light background (fill) and a darker border (stroke) for visual consistency.
+
+### Color Meaning
+
+| Component | Fill color | Border color | Meaning |
+|---|---|---|---|
+| Customer Ticket | `#DBEAFE` | `#2563EB` | Input — Incoming customer data |
+| LLM Provider | `#F3E8FF` | `#9333EA` | AI processing — External language model |
+| Output Validation | `#FEF3C7` | `#D97706` | Validation — Schema and business-rule checks |
+| PostgreSQL | `#DCFCE7` | `#16A34A` | Persistence — Data storage |
+| Human Review | `#FFEDD5` | `#EA580C` | Human oversight — Manual verification and approval |
+
+### Visual Interpretation
+
+- **Blue — Input:** The ticket entering the system.
+- **Purple — AI:** The component responsible for LLM inference.
+- **Amber — Validation:** Checks whether the LLM response is valid and usable.
+- **Green — Storage:** Persists the classification result.
+- **Orange — Human oversight:** Allows a person to review or correct the AI result.
+
+### Recommended Convention for the Complete Architecture
+
+You can extend the same color system to other components:
+
+| Color | Architectural category | Examples |
+|---|---|---|
+| Blue | Entry points / APIs | FastAPI, API Gateway |
+| Teal | Application services | Ticket Service, Classification Service |
+| Purple | AI / LLM | LLM Provider, Embeddings |
+| Amber | Validation / decision | Output Validation, Guardrails |
+| Green | Data / persistence | PostgreSQL, Redis, Vector DB |
+| Orange | Human interaction | Human Review, Approval |
+| Red | Errors / security risks | Error Handling, Security Controls |
+| Gray | Infrastructure | Docker, Cloud, Message Broker |
+
+> **Important:** These colors are a visual convention, not a universal Mermaid or software-architecture standard. The key is to use them consistently across all your project diagrams.
