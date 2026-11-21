@@ -159,6 +159,26 @@ flowchart LR
     G -->|No| I[Error Handling]
     H --> J[PostgreSQL]
     H --> K[Human Review]
+
+    classDef input fill:#DBEAFE,stroke:#2563EB,color:#1E3A8A;
+    classDef api fill:#DBEAFE,stroke:#2563EB,color:#1E3A8A;
+    classDef service fill:#CCFBF1,stroke:#0F766E,color:#134E4A;
+    classDef ai fill:#F3E8FF,stroke:#9333EA,color:#581C87;
+    classDef validation fill:#FEF3C7,stroke:#D97706,color:#92400E;
+    classDef decision fill:#FEF3C7,stroke:#D97706,color:#92400E;
+    classDef persistence fill:#DCFCE7,stroke:#16A34A,color:#166534;
+    classDef human fill:#FFEDD5,stroke:#EA580C,color:#9A3412;
+    classDef error fill:#FEE2E2,stroke:#DC2626,color:#991B1B;
+
+    class A input;
+    class B api;
+    class C,D service;
+    class E ai;
+    class F validation;
+    class G decision;
+    class H,J persistence;
+    class K human;
+    class I error;
 ```
 
 #### Diagram Color Convention
